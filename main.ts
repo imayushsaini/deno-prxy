@@ -1,142 +1,89 @@
-Deno.serve(async (req: Request) => {
-  const url = new URL(req.url);
+// Deno Proxy API
+// Customized based on your exact proxy handler specifications
 
-  // Extract 'bs-host' header (case-insensitive)
-  const bsHostHeader = req.headers.get("bs-host") || req.headers.get("BS-HOST") || req.headers.get("Bs-Host");
+const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, bs-host, secret-key",
+};
 
-  // Handle CORS preflight if no bs-host header is present
-  if (req.method === "OPTIONS" && !bsHostHeader) {
+// Regex to validate IPv4 format with optional or required port (e.g. 192.168.1.1:8000 or 192.168.1.1)
+const ipv4PortRegex = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/;
+
+Deno.serve(async (req: Request): Promise<Response> => {
+  const method = req.method;
+
+  // Handle preflight request
+  if (method === "OPTIONS") {
     return new Response(null, {
       status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Max-Age": "86400",
-      },
+      headers: corsHeaders,
     });
   }
 
-  // Handle root landing / health check or missing header error
-  if (!bsHostHeader) {
-    if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response(
-        JSON.stringify({
-          status: "online",
-          service: "Deno Proxy API",
-          usage: "Include 'bs-host' header in your request specifying the target IP or hostname.",
-          examples: {
-            curl: `curl -H "bs-host: 192.168.1.100:8000" ${url.origin}/api/v1/status`,
-            fetch: `fetch("${url.origin}/api/v1/status", { headers: { "bs-host": "192.168.1.100:8000" } })`
-          }
-        }, null, 2),
-        {
-          status: 200,
-          headers: {
-            "content-type": "application/json; charset=utf-8",
-            "Access-Control-Allow-Origin": "*",
-          },
-        }
-      );
-    }
+  // Robust path & query string extraction (works locally and on .dev domains)
+  const urlObj = new URL(req.url);
+  const path = urlObj.pathname + urlObj.search;
 
-    return new Response(
-      JSON.stringify({
-        error: "Missing required 'bs-host' header",
-        message: "Please specify target IP or hostname in 'bs-host' request header (e.g. 'bs-host: 192.168.1.100:8000')",
-      }, null, 2),
-      {
-        status: 400,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "Access-Control-Allow-Origin": "*",
-        },
-      }
-    );
+  // Health check endpoint
+  if (path === "/proxy-ping") {
+    return new Response(null, {
+      status: 200,
+      headers: corsHeaders,
+    });
   }
 
-  // Sanitize target host
-  let rawHost = bsHostHeader.trim();
-  // Default to http:// if no protocol scheme is provided
-  if (!/^https?:\/\//i.test(rawHost)) {
-    rawHost = `http://${rawHost}`;
+  // Extract bs-host header
+  const hostHeader = req.headers.get("bs-host");
+  if (!hostHeader) {
+    return new Response("Host header not found", {
+      status: 400,
+      headers: corsHeaders,
+    });
   }
 
-  // Strip trailing slashes from target host URL
-  const targetBase = rawHost.replace(/\/+$/, "");
-
-  // Construct final target URL preserving pathname and query parameters
-  const targetUrlString = `${targetBase}${url.pathname}${url.search}`;
-
-  // Prepare headers to forward to target host
-  const forwardHeaders = new Headers();
-  for (const [key, value] of req.headers.entries()) {
-    const lowerKey = key.toLowerCase();
-    // Omit hop-by-hop and bs-host headers
-    if (
-      lowerKey === "bs-host" ||
-      lowerKey === "host" ||
-      lowerKey === "connection" ||
-      lowerKey === "keep-alive" ||
-      lowerKey === "transfer-encoding" ||
-      lowerKey === "content-length"
-    ) {
-      continue;
-    }
-    forwardHeaders.set(key, value);
+  // Validate the host header for IPv4 and port
+  const trimmedHost = hostHeader.trim();
+  if (!ipv4PortRegex.test(trimmedHost)) {
+    return new Response("Invalid IP:Port format", {
+      status: 400,
+      headers: corsHeaders,
+    });
   }
 
-  // Prepare body (GET and HEAD requests must not contain a body)
-  const body = (req.method === "GET" || req.method === "HEAD") ? null : req.body;
-
-  const fetchOptions: RequestInit & { duplex?: string } = {
-    method: req.method,
-    headers: forwardHeaders,
-    body: body,
-    redirect: "manual",
-  };
-
-  if (body) {
-    fetchOptions.duplex = "half";
-  }
+  const targetUrl = `http://${trimmedHost}${path}`;
 
   try {
-    const upstreamRes = await fetch(targetUrlString, fetchOptions);
+    const body = method !== "GET" && method !== "HEAD" ? await req.text() : undefined;
 
-    // Copy upstream response headers
-    const resHeaders = new Headers(upstreamRes.headers);
+    const forwardHeaders = new Headers(req.headers);
+    // Remove host / bs-host to avoid header conflicts with upstream server
+    forwardHeaders.delete("bs-host");
+    forwardHeaders.delete("host");
 
-    // Enable CORS for clients if not explicitly defined by upstream
-    if (!resHeaders.has("Access-Control-Allow-Origin")) {
-      resHeaders.set("Access-Control-Allow-Origin", "*");
+    const response = await fetch(targetUrl, {
+      method: method,
+      body: body,
+      headers: forwardHeaders,
+    });
+
+    const newHeaders = new Headers(response.headers);
+    for (const [key, value] of Object.entries(corsHeaders)) {
+      newHeaders.set(key, value);
     }
+    // Delete content-length to prevent chunk mismatch issues
+    newHeaders.delete("content-length");
 
-    // Remove content-length to prevent chunk mismatch issues when streaming
-    resHeaders.delete("content-length");
-    resHeaders.delete("content-encoding");
-
-    return new Response(upstreamRes.body, {
-      status: upstreamRes.status,
-      statusText: upstreamRes.statusText,
-      headers: resHeaders,
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders,
     });
   } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    console.error(`[Proxy Error] Failed forwarding to ${targetUrlString}:`, errorMessage);
-
-    return new Response(
-      JSON.stringify({
-        error: "Bad Gateway",
-        message: `Failed to connect to target host at ${targetUrlString}`,
-        details: errorMessage,
-      }, null, 2),
-      {
-        status: 502,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "Access-Control-Allow-Origin": "*",
-        },
-      }
-    );
+    console.error(`Proxy error forwarding to ${targetUrl}:`, err);
+    return new Response(`Proxy error: ${err instanceof Error ? err.message : String(err)}`, {
+      status: 502,
+      headers: corsHeaders,
+    });
   }
 });
