@@ -1,14 +1,16 @@
 # Deno Proxy API
 
-Lightweight Deno API proxy for Deno Deploy, customized to validate and forward requests to IPv4 target hosts specified in the `bs-host` header.
+Lightweight Deno API proxy for Deno Deploy, customized to validate and forward requests to IPv4 target hosts specified in the `bs-host` header with full CORS support and timeout handling.
 
 ## Features
 
-- 🎯 **IPv4 Validation**: Validates target IP:Port in `bs-host` header against IPv4 pattern.
-- 🏓 **Ping Endpoint**: `/proxy-ping` health check endpoint returns 200 OK.
-- 🌐 **CORS Configuration**: Handles OPTIONS preflight and sets CORS headers (`Access-Control-Allow-Headers: Content-Type, Authorization, bs-host, secret-key`).
+- 🎯 **IPv4 Validation**: Validates target IP:Port in `bs-host` header against IPv4 pattern (e.g. `192.168.1.1:8000`).
+- 🏓 **Ping Endpoint**: `/proxy-ping` health check endpoint returns `200 OK`.
+- 🌐 **Comprehensive CORS Support**: Handles `OPTIONS` preflight, sets wildcard CORS headers (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Headers: *`, `Access-Control-Expose-Headers: *`), and strips upstream CORS collisions.
+- ⏱️ **Fast-Fail & Timeout Handling**: Built-in 10-second timeout (configurable via `bs-timeout` header) prevents hanging connections and returns standard `504 Gateway Timeout` with CORS headers.
 - 🛣️ **Path & Query Preservation**: Preserves request paths and query parameters.
-- ⚡ **Modern Deno Native Server**: Uses built-in `Deno.serve` (no external `std/http` dependency needed).
+- 📦 **Binary & JSON Safe**: Uses `arrayBuffer()` streaming to preserve binary payloads, forms, and JSON without corruption.
+- ⚡ **Modern Deno Native Server**: Uses built-in `Deno.serve`.
 
 ## Endpoints & Behavior
 
@@ -24,18 +26,25 @@ Header format required:
 bs-host: 192.168.1.100:8000
 ```
 
+Optional timeout override (in milliseconds):
+```http
+bs-timeout: 5000
+```
+
 #### Example cURL
 ```bash
 curl -H "bs-host: 192.168.1.100:8000" \
-     -H "secret-key: mysecret" \
+     -H "bs-timeout: 10000" \
+     -H "Authorization: Bearer mytoken" \
      https://your-proxy.deno.dev/api/data
 ```
 *Forwards request to `http://192.168.1.100:8000/api/data`*
 
-### 3. Error Responses
-- **Missing `bs-host`**: Returns `400 Bad Request` with message `"Host header not found"`.
-- **Invalid IPv4 format**: Returns `400 Bad Request` with message `"Invalid IP:Port format"`.
-- **Upstream connection failure**: Returns `502 Bad Gateway` with proxy error message.
+### 3. Error Responses (All with CORS headers & JSON body)
+- **Missing `bs-host`**: Returns `400 Bad Request` with message `Missing required 'bs-host' header`.
+- **Invalid IPv4 format**: Returns `400 Bad Request` with message `Invalid 'bs-host' format`.
+- **Upstream timeout**: Returns `504 Gateway Timeout` when target fails to respond in time.
+- **Upstream connection failure**: Returns `502 Bad Gateway` on connection refused / network error.
 
 ## Running Locally
 
