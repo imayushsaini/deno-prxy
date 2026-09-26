@@ -9,5 +9,10 @@
       "deno.ns",
       "dom"
     ]
+  },
+  "deploy": {
+    "org": "bcspro",
+    "app": "ws-prxy"
   }
 }
+

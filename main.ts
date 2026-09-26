@@ -133,6 +133,19 @@ async function getOrFetchTarget(
     forwardHeaders.delete("host");
     forwardHeaders.delete("connection");
 
+    // Ensure Content-Type header is set when body is present for POST/PUT/PATCH/DELETE
+    if (upperMethod !== "GET" && upperMethod !== "HEAD" && body) {
+      let hasContentType = false;
+      forwardHeaders.forEach((_, key) => {
+        if (key.toLowerCase() === "content-type") {
+          hasContentType = true;
+        }
+      });
+      if (!hasContentType) {
+        forwardHeaders.set("Content-Type", "application/json");
+      }
+    }
+
     const response = await fetch(targetUrl, {
       method: upperMethod,
       headers: forwardHeaders,
@@ -321,7 +334,11 @@ function handleWebSocketUpgrade(req: Request, urlObj: URL): Response {
 
     // Default: One-time request/response over WebSocket
     try {
-      const bodyPayload = typeof msg.body === "object" ? JSON.stringify(msg.body) : (msg.body as string | undefined);
+      let bodyPayload: string | undefined = undefined;
+      if (msg.body !== undefined && msg.body !== null) {
+        bodyPayload = typeof msg.body === "string" ? msg.body : JSON.stringify(msg.body);
+      }
+
       const res = await getOrFetchTarget(
         targetHost,
         msg.path,
